@@ -53,9 +53,16 @@ SESSION.headers.update(HEADERS)
 
 def fetch(url: str) -> BeautifulSoup:
     print(f"  Fetching: {url}")
-    resp = SESSION.get(url, timeout=30)
-    resp.raise_for_status()
-    return BeautifulSoup(resp.text, "lxml")
+    for attempt in range(5):
+        resp = SESSION.get(url, timeout=30)
+        if resp.status_code == 429:
+            wait = int(resp.headers.get("Retry-After", 2 ** (attempt + 1)))
+            print(f"  Rate limited — waiting {wait}s before retry…")
+            time.sleep(wait)
+            continue
+        resp.raise_for_status()
+        return BeautifulSoup(resp.text, "lxml")
+    resp.raise_for_status()  # raise after all retries exhausted
 
 
 # ---------------------------------------------------------------------------
