@@ -2,7 +2,7 @@
 # /// script
 # requires-python = ">=3.11"
 # dependencies = [
-#   "requests>=2.28",
+#   "curl_cffi>=0.7",
 #   "beautifulsoup4>=4.12",
 #   "lxml>=4.9",
 #   "ebooklib>=0.18",
@@ -23,13 +23,15 @@ Usage:
 """
 
 import argparse
+import hashlib
+import mimetypes
 import re
 import sys
 import time
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from urllib.parse import urljoin, urlparse
 
-import requests
+from curl_cffi import requests
 from bs4 import BeautifulSoup
 from ebooklib import epub
 
@@ -37,29 +39,7 @@ from ebooklib import epub
 # HTTP helpers
 # ---------------------------------------------------------------------------
 
-HEADERS = {
-    "User-Agent": (
-        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-        "AppleWebKit/537.36 (KHTML, like Gecko) "
-        "Chrome/121.0.0.0 Safari/537.36"
-    ),
-    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
-    "Accept-Language": "en-US,en;q=0.9",
-    "Accept-Encoding": "gzip, deflate, br",
-    "Connection": "keep-alive",
-    "Upgrade-Insecure-Requests": "1",
-    "Sec-Fetch-Dest": "document",
-    "Sec-Fetch-Mode": "navigate",
-    "Sec-Fetch-Site": "none",
-    "Sec-Fetch-User": "?1",
-    "Sec-CH-UA": '"Not A(Brand";v="99", "Google Chrome";v="121", "Chromium";v="121"',
-    "Sec-CH-UA-Mobile": "?0",
-    "Sec-CH-UA-Platform": '"macOS"',
-    "DNT": "1",
-}
-
-SESSION = requests.Session()
-SESSION.headers.update(HEADERS)
+SESSION = requests.Session(impersonate="chrome")
 
 
 def fetch(url: str) -> BeautifulSoup:
@@ -119,6 +99,8 @@ def extract_article(soup: BeautifulSoup, url: str) -> dict:
         title_el = soup.find("h1")
     if title_el:
         title = title_el.get_text(strip=True)
+        # Strip the "Collections: " prefix for cleaner display
+        title = re.sub(r"^Collections?:\s*", "", title)
 
     # --- Date ---
     date = ""
@@ -300,6 +282,63 @@ def _slugify(text: str) -> str:
     return re.sub(r"[^a-z0-9]+", "-", text.lower()).strip("-")[:60]
 
 
+_MIME_BY_EXT = {
+    ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
+    ".png": "image/png", ".gif": "image/gif",
+    ".svg": "image/svg+xml", ".webp": "image/webp",
+}
+
+
+def _download_images(html: str, book: epub.EpubBook, image_cache: dict) -> str:
+    """Download images referenced in *html*, add them to *book*, and rewrite src paths."""
+    soup = BeautifulSoup(html, "lxml")
+    for img in soup.find_all("img", src=True):
+        src = img["src"]
+        if src in image_cache:
+            img["src"] = image_cache[src]
+            continue
+
+        try:
+            resp = SESSION.get(src, timeout=20)
+            resp.raise_for_status()
+        except Exception as exc:
+            print(f"    Warning: could not download image {src}: {exc}", file=sys.stderr)
+            continue
+
+        # Determine file extension from URL path, falling back to content-type
+        ext = PurePosixPath(urlparse(src).path).suffix.lower()
+        if ext not in _MIME_BY_EXT:
+            ct = resp.headers.get("Content-Type", "")
+            ext = mimetypes.guess_extension(ct.split(";")[0].strip()) or ".jpg"
+        media_type = _MIME_BY_EXT.get(ext, "image/jpeg")
+
+        # Use a hash-based filename to deduplicate
+        img_hash = hashlib.md5(resp.content).hexdigest()[:12]
+        file_name = f"images/{img_hash}{ext}"
+
+        if file_name not in {v for v in image_cache.values()}:
+            item = epub.EpubItem(
+                uid=f"img-{img_hash}",
+                file_name=file_name,
+                media_type=media_type,
+                content=resp.content,
+            )
+            book.add_item(item)
+
+        image_cache[src] = file_name
+        img["src"] = file_name
+
+    # Strip attributes that break EPUB readers (lazy loading, WP metadata)
+    for img in soup.find_all("img"):
+        for attr in list(img.attrs):
+            if attr not in ("src", "alt", "width", "height"):
+                del img[attr]
+
+    # Return the modified HTML (unwrap the <html><body> wrapper that lxml adds)
+    body = soup.find("body")
+    return body.decode_contents() if body else str(soup)
+
+
 def build_epub(articles: list[dict], output_path: Path) -> None:
     book = epub.EpubBook()
 
@@ -322,10 +361,14 @@ def build_epub(articles: list[dict], output_path: Path) -> None:
     )
     book.add_item(css_item)
 
+    image_cache = {}  # url -> epub file_name
     chapters = []
     for i, art in enumerate(articles, 1):
         slug = _slugify(art["title"]) or f"chapter-{i}"
         file_name = f"chap_{i:02d}_{slug}.xhtml"
+
+        print(f"  Embedding images for chapter {i}: {art['title']}")
+        html_content = _download_images(art["html_content"], book, image_cache)
 
         meta_html = f'<div class="chapter-meta">'
         if art["date"]:
@@ -338,7 +381,7 @@ def build_epub(articles: list[dict], output_path: Path) -> None:
             f"</head><body>"
             f"<h1>{art['title']}</h1>"
             f"{meta_html}"
-            f"{art['html_content']}"
+            f"{html_content}"
             f"</body></html>"
         )
 
@@ -365,12 +408,12 @@ def build_epub(articles: list[dict], output_path: Path) -> None:
 
 def _infer_series_title(articles: list[dict]) -> str:
     """Try to extract a common series name from the article titles."""
-    titles = [a["title"] for a in articles]
-    # Look for "Collections: <Series Name>" pattern
-    m = re.match(r"Collections?:\s*(.+?)(?:,|\s+Part|\s+–|\s+-|$)", titles[0], re.IGNORECASE)
+    first_title = articles[0]["title"]
+    # Strip part numbers to get the series name
+    m = re.match(r"(.+?)(?:,\s*Part|\s+–\s+Part|\s+-\s+Part)", first_title, re.IGNORECASE)
     if m:
-        return f"ACOUP – {m.group(1).strip()}"
-    return titles[0]
+        return m.group(1).strip()
+    return first_title
 
 
 # ---------------------------------------------------------------------------
