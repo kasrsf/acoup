@@ -1,16 +1,25 @@
-#!/usr/bin/env python3
+#!/usr/bin/env -S uv run
+# /// script
+# requires-python = ">=3.11"
+# dependencies = [
+#   "requests>=2.28",
+#   "beautifulsoup4>=4.12",
+#   "lxml>=4.9",
+#   "ebooklib>=0.18",
+# ]
+# ///
 """
 acoup_reader.py — Fetch acoup.blog articles and export them as EPUB for iPhone/Apple Books.
 
 Usage:
     # Single article
-    python3 acoup_reader.py https://acoup.blog/2026/01/30/...
+    uv run acoup_reader.py https://acoup.blog/2026/01/30/...
 
     # Follow the whole series automatically (detects "next post" links)
-    python3 acoup_reader.py --series https://acoup.blog/2026/01/30/...
+    uv run acoup_reader.py --series https://acoup.blog/2026/01/30/...
 
     # Override output filename
-    python3 acoup_reader.py --output lba_collapse.epub https://acoup.blog/2026/01/30/...
+    uv run acoup_reader.py --output lba_collapse.epub https://acoup.blog/2026/01/30/...
 """
 
 import argparse

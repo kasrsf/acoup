@@ -1,0 +1,14 @@
+[project]
+name = "acoup-reader"
+version = "0.1.0"
+description = "Fetch acoup.blog articles and export as EPUB for iPhone/Apple Books"
+requires-python = ">=3.11"
+dependencies = [
+    "requests>=2.28",
+    "beautifulsoup4>=4.12",
+    "lxml>=4.9",
+    "ebooklib>=0.18",
+]
+
+[project.scripts]
+acoup-reader = "acoup_reader:main"
